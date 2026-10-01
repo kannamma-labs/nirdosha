@@ -23,6 +23,7 @@ blocked_by = []
 stage = "built"
 codegen = { template = "login", mount_symbol = "mount_login", route_path = "/login", generated_files = ["src/app_shell.nir"] }
 parameters.demo_users = [
+    { username = "demo", password = "demo123", roles = ["PlatformAdmin", "MerchantAdmin", "Operator", "ComplianceOfficer", "RiskAnalyst"], avatar = "https://i.pravatar.cc/150?u=demo" },
     { username = "platform", password = "pass123", roles = ["PlatformAdmin"], avatar = "https://i.pravatar.cc/150?u=platform" },
     { username = "merchant", password = "pass123", roles = ["MerchantAdmin"], avatar = "https://i.pravatar.cc/150?u=merchant" },
     { username = "operator", password = "pass123", roles = ["Operator"], avatar = "https://i.pravatar.cc/150?u=operator" },

@@ -52,6 +52,13 @@ const GUARDED_METHODS: &[&str] = &[
     "store.compliance_review(",
     "store.mlro_approve(",
     "store.mark_submitted(",
+    "store.create_draft(",
+    "store.submit_for_approval(",
+    "store.approve(",
+    "store.enable(",
+    "store.disable(",
+    "store.retire(",
+    "store.rollback(",
 ];
 
 /// Files allowed to call a [`GUARDED_METHODS`] method directly: the
@@ -62,7 +69,7 @@ const GUARDED_METHODS: &[&str] = &[
 /// store's invariants in isolation from a gateway is exactly what those
 /// tests are for -- see this module's own doc for why that isn't itself
 /// a bypass).
-const ALLOWED_FILES: &[&str] = &["alert.rs", "case.rs", "sar.rs", "durable_store.rs", "verify.rs"];
+const ALLOWED_FILES: &[&str] = &["alert.rs", "case.rs", "sar.rs", "rule_gateway.rs", "durable_store.rs", "verify.rs"];
 
 /// Scans every `.rs` file directly under `src_dir` (non-recursive -- this
 /// crate's own layout is flat) for a guarded method call outside an

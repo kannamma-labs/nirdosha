@@ -163,9 +163,82 @@ mlro_approval_role = "MLRO"
 submit_role = "MLRO"
 "#;
 
+#[derive(Debug, Deserialize)]
+struct RawRuleWorkflowPolicyFile {
+    rule_workflow: RawRuleWorkflowPolicy,
+}
+
+#[derive(Debug, Deserialize)]
+struct RawRuleWorkflowPolicy {
+    create_role: String,
+    approve_role: String,
+    enable_role: String,
+    disable_role: String,
+    retire_role: String,
+    rollback_role: String,
+}
+
+/// `[rule_workflow]` policy: which role each rule-governance step
+/// requires -- same "loaded from data, not hardcoded" discipline as
+/// [`CaseWorkflowPolicy`]/[`SarWorkflowPolicy`]. Matches the design
+/// note's role table ("RuleAuthor: draft and simulate rules";
+/// "RuleApprover: publish or supersede rules").
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RuleWorkflowPolicy {
+    pub create_role: String,
+    pub approve_role: String,
+    pub enable_role: String,
+    pub disable_role: String,
+    pub retire_role: String,
+    pub rollback_role: String,
+}
+
+impl RuleWorkflowPolicy {
+    pub fn from_toml_str(src: &str) -> Result<Self, CaseWorkflowPolicyError> {
+        let raw: RawRuleWorkflowPolicyFile = toml::from_str(src).map_err(|e| CaseWorkflowPolicyError::Parse(e.to_string()))?;
+        let p = raw.rule_workflow;
+        for (name, value) in [
+            ("create_role", &p.create_role),
+            ("approve_role", &p.approve_role),
+            ("enable_role", &p.enable_role),
+            ("disable_role", &p.disable_role),
+            ("retire_role", &p.retire_role),
+            ("rollback_role", &p.rollback_role),
+        ] {
+            if value.trim().is_empty() {
+                return Err(CaseWorkflowPolicyError::EmptyField(name));
+            }
+        }
+        Ok(RuleWorkflowPolicy { create_role: p.create_role, approve_role: p.approve_role, enable_role: p.enable_role, disable_role: p.disable_role, retire_role: p.retire_role, rollback_role: p.rollback_role })
+    }
+
+    /// This slice's own governed default. A real deployment supplies its
+    /// own TOML instead of calling this.
+    pub fn default_v1() -> Self {
+        Self::from_toml_str(RULE_DEFAULT_V1_TOML).expect("crate's own default rule policy TOML must parse")
+    }
+}
+
+const RULE_DEFAULT_V1_TOML: &str = r#"
+[rule_workflow]
+create_role = "RuleAuthor"
+approve_role = "RuleApprover"
+enable_role = "RuleApprover"
+disable_role = "RuleApprover"
+retire_role = "RuleApprover"
+rollback_role = "RuleApprover"
+"#;
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rule_default_v1_matches_the_design_notes_role_table() {
+        let policy = RuleWorkflowPolicy::default_v1();
+        assert_eq!(policy.create_role, "RuleAuthor");
+        assert_eq!(policy.approve_role, "RuleApprover");
+    }
 
     #[test]
     fn sar_default_v1_matches_the_design_notes_role_table() {

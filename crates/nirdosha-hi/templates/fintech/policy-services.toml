@@ -33,3 +33,12 @@ gateway = "ctms_case_gateway_v1"
 required_facts = ["subject_identity"]
 allowed_parameters = ["eligible_roles", "jurisdiction"]
 failure_posture = "FailClosed"
+
+[service.rule_create]
+resource = "MonitoringRule"
+effect = "rule.create"
+policy_kind = "Authorization"
+gateway = "ctms_rule_gateway_v1"
+required_facts = ["subject_identity"]
+allowed_parameters = ["jurisdiction"]
+failure_posture = "FailClosed"

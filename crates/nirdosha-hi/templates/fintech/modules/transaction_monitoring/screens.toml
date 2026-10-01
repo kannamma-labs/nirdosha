@@ -32,29 +32,46 @@ policy = { purpose = "TxnRead", allowed_actions = ["read", "aggregate", "update"
 file = "src/screens/m09_txn_monitor.nir"
 notes = "Real-time transaction stream with risk score and monitoring status."
 
+# Unblocked: primitive:rule_engine / primitive:velocity_check /
+# primitive:amount_threshold now exist for real, in nirdosha-ctms's
+# rule_model/rule_engine/rule_gateway modules (RuleDefinition's governed
+# lifecycle, RuleEngine::evaluate's three deterministic rule types,
+# CtmsRuleGatewayV1's seven capability-gated effects) -- proven by that
+# crate's own tests, including the full draft -> approve -> enable ->
+# realtime-and-batch-match -> alert acceptance scenario in
+# tests/monitoring_rules_e2e.rs. This screen only wires rule *drafting*
+# (rule.create) through the generated HTTP path, mirroring 9.3/9.4's own
+# division of responsibility: generic guarded-table row storage here,
+# RFC 0029 authorization/evidence via CtmsRuleCreateGatewayV1. Approve/
+# enable/disable/retire/rollback are real (CtmsRuleApproveGatewayV1 and
+# friends) but not yet exposed as further screen routes -- disclosed, not
+# silently missing, same as case.escalate/senior_review/disposition's own
+# gateway-only status.
 [[screen]]
 id = "9.2"
 name = "Monitoring Rules"
 module = "M9"
-archetype = "report_builder"
-roles = ["PlatformAdmin", "RiskAnalyst"]
-stage = "blocked"
-blocked_by = ["primitive:rule_engine", "primitive:velocity_check", "primitive:amount_threshold"]
-codegen = { template = "report", mount_symbol = "mount_monitoring_rules", route_path = "/transactions/rules", generated_files = ["src/screens/m09_txn_monitor.nir"] }
-data_binding = { entities = ["Transaction"], primary_key = "transaction_id", guard = { table = "transaction", purpose = "TxnRead" }, fields = [
-    { name = "transaction_id", type = "String" },
-    { name = "merchant_id", type = "String" },
-    { name = "amount_cents", type = "String" },
+archetype = "crud_screens"
+combo = []
+roles = ["RuleAuthor:R/W"]
+datasets = ["PG.ctms_rules"]
+blocked_by = []
+stage = "built"
+codegen = { template = "crud_screens", mount_symbol = "mount_ctms_rules", route_path = "/ctms/rules", generated_files = ["src/screens/m09_ctms_rules.nir"] }
+data_binding = { entities = ["MonitoringRule"], primary_key = "rule_id", guard = { table = "ctms_rule_table", purpose = "TxnRead" }, fields = [
+    { name = "rule_id", type = "String" },
+    { name = "version", type = "String" },
+    { name = "name", type = "String" },
+    { name = "rule_type", type = "String" },
     { name = "currency", type = "String" },
+    { name = "jurisdiction", type = "String" },
+    { name = "severity", type = "String" },
     { name = "status", type = "String" },
-    { name = "risk_score", type = "String" }
 ] }
-policy = { purpose = "TxnRead", allowed_actions = ["read"] }
-[screen.parameters]
-dimensions = ["currency", "status"]
-access = "role_gated"
-file = "src/screens/m09_txn_monitor.nir"
-notes = "BLOCKED: rule-engine + velocity/threshold primitives not yet available."
+policy = { purpose = "TxnRead", allowed_actions = ["read", "create"] }
+parameters = { access_create = 'requires role "RuleAuthor"', access_read = 'requires role "RuleAuthor"', create_fields = ["rule_id", "version", "name", "rule_type", "currency", "jurisdiction", "severity", "status"] }
+service = { name = "rule_create", version = "1", parameters = { jurisdiction = "IN" } }
+notes = "Drafting only, through the generic guarded table (same division of responsibility as 9.3/9.4). Approval/activation is a real, tested nirdosha-ctms gateway+service capability (CtmsRuleApproveGatewayV1/CtmsRuleEnableGatewayV1/...), not yet its own screen route."
 
 # ------------------------------------------------------------------ CTMS alert/case gateways
 # Real rule evaluation (velocity_24h), the AI model signal, and the

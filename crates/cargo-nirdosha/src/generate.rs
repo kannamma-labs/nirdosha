@@ -921,6 +921,16 @@ fn known_gateway_rust_type(gateway: &str, effect: &str) -> Option<&'static str> 
             "case.disposition" => Some("::nirdosha_ctms::case::CtmsCaseDispositionGatewayV1"),
             _ => None,
         },
+        "ctms_rule_gateway_v1" => match effect {
+            "rule.create" => Some("::nirdosha_ctms::rule_gateway::CtmsRuleCreateGatewayV1"),
+            "rule.submit_for_approval" => Some("::nirdosha_ctms::rule_gateway::CtmsRuleSubmitGatewayV1"),
+            "rule.approve" => Some("::nirdosha_ctms::rule_gateway::CtmsRuleApproveGatewayV1"),
+            "rule.enable" => Some("::nirdosha_ctms::rule_gateway::CtmsRuleEnableGatewayV1"),
+            "rule.disable" => Some("::nirdosha_ctms::rule_gateway::CtmsRuleDisableGatewayV1"),
+            "rule.retire" => Some("::nirdosha_ctms::rule_gateway::CtmsRuleRetireGatewayV1"),
+            "rule.rollback" => Some("::nirdosha_ctms::rule_gateway::CtmsRuleRollbackGatewayV1"),
+            _ => None,
+        },
         _ => None,
     }
 }

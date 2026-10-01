@@ -118,7 +118,7 @@
         },
         {
           "path": "fintech/modules/core/screens.toml",
-          "sha256": "00b02390c0b42c2d135b3d813463f47c617ebf3ddda41debddcdad2da63901da"
+          "sha256": "fee0aec73ed54d6deba3d37199e3ea1e64d41277e53340bbdbffaffa2c5b673a"
         },
         {
           "path": "fintech/modules/fraud/menus.toml",
@@ -202,11 +202,11 @@
         },
         {
           "path": "fintech/modules/transaction_monitoring/menus.toml",
-          "sha256": "75702564ab0308413765c42eff7530794d8266fbfc2566fc73add42b56957a5d"
+          "sha256": "ce775fcfd1ad1fcbee514819a44a964d86a7db3c4c4a307b00ad9171b623f191"
         },
         {
           "path": "fintech/modules/transaction_monitoring/screens.toml",
-          "sha256": "05c5b611928837792ca56b2cea992fdf5b1d2f2ecc9d678809a8dd2b995a3940"
+          "sha256": "475cd1b6e8857d9af0979a71bf7eb13252ab3642a13a0c55c301d922add7ad7f"
         },
         {
           "path": "fintech/modules/wallets/menus.toml",
@@ -222,7 +222,7 @@
         },
         {
           "path": "fintech/policy-services.toml",
-          "sha256": "522948cca288a66e0c551263a1d9e780109c19f12dd3337aae2eac746ea5e262"
+          "sha256": "6d1fd4979c9ddd261f05ea1d2f5eec19cd9d410c0bc4adfecee8cfa59171ee82"
         }
       ]
     },

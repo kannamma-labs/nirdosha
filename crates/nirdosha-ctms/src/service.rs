@@ -18,7 +18,9 @@ use nirdosha_guard_rfc0029::{CapabilityIssuer, EffectGateway, GatewayError};
 use nirdosha_rt::Auth;
 
 use crate::case::{CaseStore, CtmsCaseAssignGatewayV1, CtmsCaseDispositionGatewayV1, CtmsCaseEscalateGatewayV1, CtmsCaseSeniorReviewGatewayV1, MonitoringCase};
-use crate::policy::CaseWorkflowPolicy;
+use crate::policy::{CaseWorkflowPolicy, RuleWorkflowPolicy};
+use crate::rule_gateway::{CtmsRuleApproveGatewayV1, CtmsRuleCreateGatewayV1, CtmsRuleDisableGatewayV1, CtmsRuleEnableGatewayV1, CtmsRuleRetireGatewayV1, CtmsRuleRollbackGatewayV1, CtmsRuleSubmitGatewayV1};
+use crate::rule_model::{RuleDefinition, RuleStore};
 
 #[derive(Debug, PartialEq)]
 pub enum CtmsServiceError {
@@ -128,4 +130,61 @@ pub fn disposition_case(
         .mint(auth, <CtmsCaseDispositionGatewayV1 as EffectGateway>::RESOURCE, <CtmsCaseDispositionGatewayV1 as EffectGateway>::EFFECT, now_ms)
         .map_err(CtmsServiceError::Gateway)?;
     gateway.disposition(&capability, store, case_id, auth.user(), verdict, now_ms).map_err(CtmsServiceError::Gateway)
+}
+
+/// `[service.rule_create]`: `access = 'requires role "{policy.create_role}"'`.
+pub fn create_rule(issuer: &CapabilityIssuer, gateway: &CtmsRuleCreateGatewayV1, store: &dyn RuleStore, policy: &RuleWorkflowPolicy, auth: &Auth, rule: RuleDefinition, now_ms: u64) -> Result<RuleDefinition, CtmsServiceError> {
+    require_role(auth, &policy.create_role)?;
+    let capability = issuer.mint(auth, CtmsRuleCreateGatewayV1::RESOURCE, CtmsRuleCreateGatewayV1::EFFECT, now_ms).map_err(CtmsServiceError::Gateway)?;
+    gateway.create(&capability, store, rule, now_ms).map_err(CtmsServiceError::Gateway)
+}
+
+/// `[service.rule_submit_for_approval]`: same role as drafting -- the
+/// author moves their own draft into the approval queue.
+pub fn submit_rule_for_approval(issuer: &CapabilityIssuer, gateway: &CtmsRuleSubmitGatewayV1, store: &dyn RuleStore, policy: &RuleWorkflowPolicy, auth: &Auth, rule_id: &str, version: u32, now_ms: u64) -> Result<RuleDefinition, CtmsServiceError> {
+    require_role(auth, &policy.create_role)?;
+    let capability = issuer.mint(auth, CtmsRuleSubmitGatewayV1::RESOURCE, CtmsRuleSubmitGatewayV1::EFFECT, now_ms).map_err(CtmsServiceError::Gateway)?;
+    gateway.submit(&capability, store, rule_id, version, now_ms).map_err(CtmsServiceError::Gateway)
+}
+
+/// `[service.rule_approve]`: `access = 'requires role "{policy.approve_role}"'`.
+/// `RuleStore::approve`'s own same-actor check is the independent,
+/// data-level control that a *different* `RuleApprover` (one this role
+/// check alone would also admit) still cannot approve their own rule --
+/// see `crate::rule_model`'s doc.
+pub fn approve_rule(issuer: &CapabilityIssuer, gateway: &CtmsRuleApproveGatewayV1, store: &dyn RuleStore, policy: &RuleWorkflowPolicy, auth: &Auth, rule_id: &str, version: u32, now_ms: u64) -> Result<RuleDefinition, CtmsServiceError> {
+    require_role(auth, &policy.approve_role)?;
+    let capability = issuer.mint(auth, CtmsRuleApproveGatewayV1::RESOURCE, CtmsRuleApproveGatewayV1::EFFECT, now_ms).map_err(CtmsServiceError::Gateway)?;
+    gateway.approve(&capability, store, rule_id, version, auth.user(), now_ms).map_err(CtmsServiceError::Gateway)
+}
+
+/// `[service.rule_enable]`: `access = 'requires role "{policy.enable_role}"'`.
+/// `RuleStore::enable` itself refuses a rule that isn't yet `Approved` --
+/// "a RiskAnalyst cannot activate a rule without approval" holds even for
+/// a caller with the right role, because the *rule* was never approved.
+pub fn enable_rule(issuer: &CapabilityIssuer, gateway: &CtmsRuleEnableGatewayV1, store: &dyn RuleStore, policy: &RuleWorkflowPolicy, auth: &Auth, rule_id: &str, version: u32, now_ms: u64) -> Result<RuleDefinition, CtmsServiceError> {
+    require_role(auth, &policy.enable_role)?;
+    let capability = issuer.mint(auth, CtmsRuleEnableGatewayV1::RESOURCE, CtmsRuleEnableGatewayV1::EFFECT, now_ms).map_err(CtmsServiceError::Gateway)?;
+    gateway.enable(&capability, store, rule_id, version, now_ms).map_err(CtmsServiceError::Gateway)
+}
+
+/// `[service.rule_disable]`: `access = 'requires role "{policy.disable_role}"'`.
+pub fn disable_rule(issuer: &CapabilityIssuer, gateway: &CtmsRuleDisableGatewayV1, store: &dyn RuleStore, policy: &RuleWorkflowPolicy, auth: &Auth, rule_id: &str, version: u32, now_ms: u64) -> Result<RuleDefinition, CtmsServiceError> {
+    require_role(auth, &policy.disable_role)?;
+    let capability = issuer.mint(auth, CtmsRuleDisableGatewayV1::RESOURCE, CtmsRuleDisableGatewayV1::EFFECT, now_ms).map_err(CtmsServiceError::Gateway)?;
+    gateway.disable(&capability, store, rule_id, version, now_ms).map_err(CtmsServiceError::Gateway)
+}
+
+/// `[service.rule_retire]`: `access = 'requires role "{policy.retire_role}"'`.
+pub fn retire_rule(issuer: &CapabilityIssuer, gateway: &CtmsRuleRetireGatewayV1, store: &dyn RuleStore, policy: &RuleWorkflowPolicy, auth: &Auth, rule_id: &str, version: u32, now_ms: u64) -> Result<RuleDefinition, CtmsServiceError> {
+    require_role(auth, &policy.retire_role)?;
+    let capability = issuer.mint(auth, CtmsRuleRetireGatewayV1::RESOURCE, CtmsRuleRetireGatewayV1::EFFECT, now_ms).map_err(CtmsServiceError::Gateway)?;
+    gateway.retire(&capability, store, rule_id, version, now_ms).map_err(CtmsServiceError::Gateway)
+}
+
+/// `[service.rule_rollback]`: `access = 'requires role "{policy.rollback_role}"'`.
+pub fn rollback_rule(issuer: &CapabilityIssuer, gateway: &CtmsRuleRollbackGatewayV1, store: &dyn RuleStore, policy: &RuleWorkflowPolicy, auth: &Auth, rule_id: &str, to_version: u32, now_ms: u64) -> Result<RuleDefinition, CtmsServiceError> {
+    require_role(auth, &policy.rollback_role)?;
+    let capability = issuer.mint(auth, CtmsRuleRollbackGatewayV1::RESOURCE, CtmsRuleRollbackGatewayV1::EFFECT, now_ms).map_err(CtmsServiceError::Gateway)?;
+    gateway.rollback(&capability, store, rule_id, to_version, now_ms).map_err(CtmsServiceError::Gateway)
 }

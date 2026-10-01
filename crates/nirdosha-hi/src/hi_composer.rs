@@ -1929,4 +1929,118 @@ fn case_assign_screen_to_ctms_case_gateway_demo() {
     assert_eq!(wrong_role.status, 403, "body: {}", wrong_role.body);
 }
 "####;
+
+    /// The live Monitoring Rules screen demo, mirroring
+    /// `ctms_alert_and_case_screens_live_demo_screen_to_gateway`: proves
+    /// screen 9.2's `rule.create` route is really wired to
+    /// `CtmsRuleCreateGatewayV1` (`ctms_rule_gateway_v1` newly added to
+    /// `known_gateway_rust_type` this pass) over real HTTP dispatch.
+    #[test]
+    fn ctms_monitoring_rules_screen_live_demo_screen_to_gateway() {
+        let dir = std::env::temp_dir().join(format!("nir_hi_ctms_rules_live_demo_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let result = compose_project(
+            &dir,
+            "fintech",
+            &["core".to_string(), "merchants".to_string(), "transaction_monitoring".to_string()],
+            None,
+        )
+        .expect("fintech+transaction_monitoring compose should succeed");
+
+        generate_screens(&result.path).expect("rule_create must be admitted and generated");
+
+        let tests_dir = result.path.join("tests");
+        std::fs::create_dir_all(&tests_dir).expect("creating tests/ dir");
+        std::fs::write(tests_dir.join("ctms_rules_e2e.rs"), CTMS_RULES_SCREEN_E2E_TEST_SRC).expect("writing ctms_rules_e2e.rs");
+
+        test_project(&result.path).expect(
+            "the live Monitoring Rules demo must pass: valid create, row round-trip, evidence write, replay rejection, and wrong-role rejection",
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Appended as `tests/ctms_rules_e2e.rs` into the composed project by
+    /// `ctms_monitoring_rules_screen_live_demo_screen_to_gateway`.
+    const CTMS_RULES_SCREEN_E2E_TEST_SRC: &str = r####"
+use nirdosha_rt::{Auth, Request, Response, Router};
+use fintech_payments::transaction_monitoring_screens_m09_ctms_rules::mount_ctms_rules;
+use std::collections::HashMap;
+
+fn router() -> Router {
+    mount_ctms_rules(Router::new(|req: &Request| {
+        let roles: Vec<&str> = req.header("x-roles").map(|s| s.split(',').collect()).unwrap_or_default();
+        Auth::login("e2e-rule-author", &roles)
+    }))
+}
+
+fn req(method: &str, path: &str, roles: Option<&str>, body: &str) -> Request {
+    let mut headers = HashMap::new();
+    if let Some(r) = roles {
+        headers.insert("x-roles".to_string(), r.to_string());
+    }
+    if body.trim_start().starts_with('{') {
+        headers.insert("content-type".to_string(), "application/json".to_string());
+    }
+    Request { method: method.into(), path: path.into(), headers, body: body.into() }
+}
+
+fn dispatch(router: &Router, method: &str, path: &str, roles: Option<&str>, body: &str) -> Response {
+    router.dispatch(&req(method, path, roles, body))
+}
+
+const RULE_BODY: &str = r#"{"rule_id":"velocity_24h","version":"1","name":"Velocity 24h","rule_type":"velocity","currency":"INR","jurisdiction":"IN","severity":"high","status":"Draft"}"#;
+
+#[test]
+fn rule_create_screen_to_ctms_rule_gateway_demo() {
+    let evidence_path = std::path::Path::new(".nir-evidence/ctms_rule_gateway_v1.jsonl");
+    let _ = std::fs::remove_file(evidence_path);
+    let router = router();
+
+    // Valid RuleAuthor request succeeds: screen -> auth POST -> admitted
+    // service -> capability minted -> CtmsRuleCreateGatewayV1 validated -> guarded insert.
+    let created = dispatch(&router, "POST", "/api/ctms/rules", Some("RuleAuthor"), RULE_BODY);
+    assert_eq!(created.status, 201, "body: {}", created.body);
+    let entity: serde_json::Value = serde_json::from_str(&created.body).expect("created body is JSON");
+    assert_eq!(entity["rule_id"], "velocity_24h");
+
+    // Rule row is created: it round-trips through the guarded list route.
+    let list = dispatch(&router, "GET", "/api/ctms/rules", Some("RuleAuthor"), "");
+    assert_eq!(list.status, 200, "body: {}", list.body);
+    let items: serde_json::Value = serde_json::from_str(&list.body).expect("list body is JSON");
+    assert!(
+        items.as_array().unwrap().iter().any(|it| it["rule_id"] == "velocity_24h"),
+        "created rule row missing from list: {}",
+        list.body
+    );
+
+    // Evidence file is written: CtmsRuleCreateGatewayV1's hash-chained log
+    // has a real "accepted" decision for this effect.
+    let evidence = std::fs::read_to_string(evidence_path).expect("evidence file must exist after a real decision");
+    assert!(
+        evidence.lines().any(|line| {
+            let v: serde_json::Value = serde_json::from_str(line).expect("evidence line is JSON");
+            v["content"]["decision"] == "accepted" && v["content"]["action"] == "rule.create" && v["content"]["resource"] == "MonitoringRule"
+        }),
+        "no accepted rule.create evidence entry found:\n{evidence}"
+    );
+
+    // Replay is rejected: resubmitting the same rule_id is denied, not
+    // silently double-applied.
+    let replay = dispatch(&router, "POST", "/api/ctms/rules", Some("RuleAuthor"), RULE_BODY);
+    assert_eq!(replay.status, 403, "body: {}", replay.body);
+    assert!(replay.body.contains("already exists"), "replay rejection reason: {}", replay.body);
+
+    // Wrong role is rejected: a RiskAnalyst may not draft a rule here.
+    let wrong_role = dispatch(
+        &router,
+        "POST",
+        "/api/ctms/rules",
+        Some("RiskAnalyst"),
+        r#"{"rule_id":"velocity_1h","version":"1","name":"Velocity 1h","rule_type":"velocity","currency":"INR","jurisdiction":"IN","severity":"medium","status":"Draft"}"#,
+    );
+    assert_eq!(wrong_role.status, 403, "body: {}", wrong_role.body);
+}
+"####;
 }

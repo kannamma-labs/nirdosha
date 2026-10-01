@@ -23,9 +23,9 @@ id = "nav.monitoring_rules"
 label_key = "nav.monitoring_rules"
 group = "monitoring"
 screen_id = "9.2"
-route = "/transactions/rules"
-guard = { action = "read", resource = "transaction" }
-roles = ["PlatformAdmin", "RiskAnalyst"]
+route = "/ctms/rules"
+guard = { action = "read", resource = "monitoringrule" }
+roles = ["RuleAuthor"]
 order = 20
 
 [[menu]]
